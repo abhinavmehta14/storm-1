@@ -38,8 +38,8 @@ import java.net.URI;
 
 public class LocalFileServer {
 
-  public static final Logger LOG = LoggerFactory.getLogger(LocalFileServer.class);
-  private Server _server = new Server();
+  private static final Logger LOG = LoggerFactory.getLogger(LocalFileServer.class);
+  private Server server = new Server();
 
   public static void main(String[] args) throws Exception {
 
@@ -61,13 +61,13 @@ public class LocalFileServer {
 
     if (port.isPresent()) {
       LOG.info("Starting local file server on port: {}", port.get());
-      _server = new Server(port.get());
+      server = new Server(port.get());
     } else {
-      _server = new Server();
+      server = new Server();
     }
     SelectChannelConnector connector = new SelectChannelConnector();
     connector.setPort(0);
-    _server.addConnector(connector);
+    server.addConnector(connector);
 
     ResourceHandler resourceHandler = new ResourceHandler();
     resourceHandler.setResourceBase(filePath);
@@ -78,21 +78,21 @@ public class LocalFileServer {
 
     HandlerList handlers = new HandlerList();
     handlers.setHandlers(new Handler[]{staticContextHandler});
-    _server.setHandler(handlers);
-    _server.start();
+    server.setHandler(handlers);
+    server.start();
 
     // get the connector once it is init so we can get the actual port it bound to.
-    Connector initConn = _server.getConnectors()[0];
+    Connector initConn = server.getConnectors()[0];
     return new URI("http", null, host, initConn.getLocalPort(), uriPath, null, null);
   }
 
   private static String getHost() throws Exception {
-    return Optional.fromNullable((String) System.getenv("MESOS_NIMBUS_HOST"))
+    return Optional.fromNullable(System.getenv("MESOS_NIMBUS_HOST"))
         .or(InetAddress.getLocalHost().getCanonicalHostName());
   }
 
   public void shutdown() throws Exception {
-    _server.stop();
+    server.stop();
   }
 
 }
