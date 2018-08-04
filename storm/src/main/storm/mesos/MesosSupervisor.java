@@ -17,28 +17,20 @@
  */
 package storm.mesos;
 
+import clojure.lang.PersistentVector;
+import org.apache.mesos.ExecutorDriver;
+import org.apache.mesos.MesosExecutorDriver;
+import org.apache.mesos.Protos.TaskID;
+import org.apache.mesos.Protos.TaskState;
+import org.apache.mesos.Protos.TaskStatus;
 import org.apache.storm.daemon.supervisor.Supervisor;
 import org.apache.storm.scheduler.ISupervisor;
 import org.apache.storm.utils.ConfigUtils;
-import org.apache.storm.utils.Utils;
-import clojure.lang.PersistentVector;
-import org.apache.mesos.Executor;
-import org.apache.mesos.ExecutorDriver;
-import org.apache.mesos.MesosExecutorDriver;
-import org.apache.mesos.Protos.ExecutorInfo;
-import org.apache.mesos.Protos.FrameworkInfo;
-import org.apache.mesos.Protos.SlaveInfo;
-import org.apache.mesos.Protos.TaskID;
-import org.apache.mesos.Protos.TaskInfo;
-import org.apache.mesos.Protos.TaskState;
-import org.apache.mesos.Protos.TaskStatus;
-import org.json.simple.JSONValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import storm.mesos.util.MesosCommon;
 
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static java.lang.String.format;
@@ -48,11 +40,9 @@ public class MesosSupervisor implements ISupervisor {
   private static final Logger LOG = LoggerFactory.getLogger(MesosSupervisor.class);
   // Store state on port assignments arriving from MesosNimbus as task-launching requests.
   private static final TaskAssignments TASK_ASSIGNMENTS = TaskAssignments.getInstance();
-  private volatile String executorId;
-  private volatile String supervisorId;
-  private volatile String assignmentId;
-  private volatile ExecutorDriver driver;
   private Map conf;
+  private ExecutorDriver mesosExecutorDriver;
+  private StormExecutor stormExecutor;
   // What is the storm-core supervisor's view of the assigned ports?
   private AtomicReference<Set<Integer>> supervisorViewOfAssignedPorts = new AtomicReference<Set<Integer>>(new HashSet<Integer>());
 
@@ -109,18 +99,18 @@ public class MesosSupervisor implements ISupervisor {
 
   @Override
   public void prepare(Map conf, String localDir) {
-    StormExecutor executor = new StormExecutor();
-    driver = new MesosExecutorDriver(executor);
-    driver.start();
+    stormExecutor = new StormExecutor();
+    mesosExecutorDriver = new MesosExecutorDriver(stormExecutor);
+    mesosExecutorDriver.start();
     LOG.info("Waiting for executor to initialize...");
     this.conf = conf;
     try {
-      executor.waitUntilRegistered();
+      stormExecutor.waitUntilRegistered();
     } catch (InterruptedException e) {
       throw new RuntimeException(e);
     }
     LOG.info("Executor initialized...");
-    Thread suicide = new SuicideDetector(conf);
+    Thread suicide = new SupervisorSuicideDetector(conf, supervisorViewOfAssignedPorts);
     suicide.setDaemon(true);
     suicide.start();
   }
@@ -158,140 +148,30 @@ public class MesosSupervisor implements ISupervisor {
 
   @Override
   public String getSupervisorId() {
-    return supervisorId;
+    // TODO: keep supervisorId local to this class
+    return stormExecutor.getSupervisorId();
   }
 
   @Override
   public String getAssignmentId() {
-    return MesosCommon.hostFromAssignmentId(assignmentId, MesosCommon.getWorkerPrefixDelimiter(conf));
+    return MesosCommon.hostFromAssignmentId(stormExecutor.getAssignmentId(), MesosCommon.getWorkerPrefixDelimiter(conf));
   }
 
   @Override
   public void killedWorker(int port) {
     LOG.info("killedWorker: executor {} removing port {} assignment and sending " +
-        "TASK_FINISHED update to Mesos", executorId, port);
+        "TASK_FINISHED update to Mesos", stormExecutor.getExecutorId(), port);
     TaskID taskId = TASK_ASSIGNMENTS.deregister(port);
     if (taskId == null) {
       LOG.error("killedWorker: Executor {} failed to find TaskID for port {}, so not " +
-          "issuing TaskStatus update to Mesos for this dead task", executorId, port);
+          "issuing TaskStatus update to Mesos for this dead task", stormExecutor.getExecutorId(), port);
       return;
     }
     TaskStatus status = TaskStatus.newBuilder()
         .setState(TaskState.TASK_FINISHED)
         .setTaskId(taskId)
         .build();
-    driver.sendStatusUpdate(status);
+    mesosExecutorDriver.sendStatusUpdate(status);
   }
 
-  class StormExecutor implements Executor {
-    private CountDownLatch registeredLatch = new CountDownLatch(1);
-
-    private void waitUntilRegistered() throws InterruptedException {
-      registeredLatch.await();
-    }
-
-    @Override
-    public void registered(ExecutorDriver driver, ExecutorInfo executorInfo, FrameworkInfo frameworkInfo, SlaveInfo slaveInfo) {
-      LOG.info("Received executor data <{}>", executorInfo.getData().toStringUtf8());
-      Map ids = (Map) JSONValue.parse(executorInfo.getData().toStringUtf8());
-      executorId = executorInfo.getExecutorId().getValue();
-      supervisorId = (String) ids.get(MesosCommon.SUPERVISOR_ID);
-      assignmentId = (String) ids.get(MesosCommon.ASSIGNMENT_ID);
-      LOG.info("Registered supervisor with Mesos: {}, {}", supervisorId, assignmentId);
-
-      // Completed registration, let anything waiting for us to do so continue
-      registeredLatch.countDown();
-    }
-
-
-    @Override
-    public void launchTask(ExecutorDriver driver, TaskInfo task) {
-      try {
-        int port = TASK_ASSIGNMENTS.register(task.getTaskId());
-        LOG.info("Executor {} received task assignment for port {}. Mesos TaskID: {}",
-            executorId, port, task.getTaskId().getValue());
-      } catch (IllegalArgumentException e) {
-        String msg =
-            format("launchTask: failed to register task. " +
-                          "Exception: %s Halting supervisor process",
-                          e.getMessage());
-        LOG.error(msg);
-        TaskStatus status = TaskStatus.newBuilder()
-            .setState(TaskState.TASK_FAILED)
-            .setTaskId(task.getTaskId())
-            .setMessage(msg)
-            .build();
-        driver.sendStatusUpdate(status);
-        Runtime.getRuntime().halt(1);
-      }
-      LOG.info("Received task assignment for TaskID: {}",
-          task.getTaskId().getValue());
-      TaskStatus status = TaskStatus.newBuilder()
-          .setState(TaskState.TASK_RUNNING)
-          .setTaskId(task.getTaskId())
-          .build();
-      driver.sendStatusUpdate(status);
-    }
-
-    @Override
-    public void killTask(ExecutorDriver driver, TaskID id) {
-      LOG.warn("killTask not implemented in executor {}, so " +
-          "cowardly refusing to kill task {}", executorId, id.getValue());
-    }
-
-    @Override
-    public void frameworkMessage(ExecutorDriver driver, byte[] data) {
-    }
-
-    @Override
-    public void shutdown(ExecutorDriver driver) {
-      LOG.warn("shutdown not implemented in executor {}, so " +
-          "cowardly refusing to kill tasks", executorId);
-    }
-
-    @Override
-    public void error(ExecutorDriver driver, String msg) {
-      LOG.error("Received fatal error \nmsg: {} \nHalting process...", msg);
-      Runtime.getRuntime().halt(2);
-    }
-
-    @Override
-    public void reregistered(ExecutorDriver driver, SlaveInfo slaveInfo) {
-      LOG.info("executor has reregistered with the mesos-slave");
-    }
-
-    @Override
-    public void disconnected(ExecutorDriver driver) {
-      LOG.info("executor has disconnected from the mesos-slave");
-    }
-  }
-
-  public class SuicideDetector extends Thread {
-    private final int timeoutSecs;
-    private long lastTime = System.currentTimeMillis();
-
-    private SuicideDetector(Map conf) {
-      timeoutSecs = MesosCommon.getSuicideTimeout(conf);
-    }
-
-    @Override
-    public void run() {
-      try {
-        while (true) {
-          long now = System.currentTimeMillis();
-          if (!supervisorViewOfAssignedPorts.get().isEmpty()) {
-            lastTime = now;
-          }
-          if ((now - lastTime) > 1000L * timeoutSecs) {
-            LOG.info("Supervisor has not had anything assigned for {} secs. Committing suicide...", timeoutSecs);
-            Runtime.getRuntime().halt(0);
-          }
-          Utils.sleep(5000);
-        }
-      } catch (Throwable t) {
-        LOG.error(t.getMessage());
-        Runtime.getRuntime().halt(2);
-      }
-    }
-  }
 }
