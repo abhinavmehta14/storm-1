@@ -20,9 +20,9 @@ class StormExecutor implements Executor {
 
   private static final TaskAssignments TASK_ASSIGNMENTS = TaskAssignments.getInstance();
   private final CountDownLatch registeredLatch = new CountDownLatch(1);
-  private volatile String assignmentId;
-  private volatile String executorId;
-  private volatile String supervisorId;
+  private String assignmentId;
+  private String executorId;
+  private String supervisorId;
 
   public String getExecutorId() {
     return executorId;
