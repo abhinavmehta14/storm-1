@@ -8,3 +8,4 @@ _release
 *.tgz
 dependency-reduced-pom.xml
 /build/
+storm/generated-conf
