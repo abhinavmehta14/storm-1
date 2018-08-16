@@ -97,7 +97,7 @@ import static storm.mesos.util.PrettyProtobuf.taskInfoListToString;
 import static storm.mesos.util.PrettyProtobuf.taskStatusListToTaskIDsString;
 
 public class MesosNimbus implements INimbus {
-  private static final String CONF_EXECUTOR_URI = "mesos.executor.uri";
+  protected static final String CONF_EXECUTOR_URI = "mesos.executor.uri";
   private static final String CONF_MASTER_URL = "mesos.master.url";
   private static final String CONF_MASTER_FAILOVER_TIMEOUT_SECS = "mesos.master.failover.timeout.secs";
   private static final String CONF_MESOS_ALLOWED_HOSTS = "mesos.allowed.hosts";
@@ -204,7 +204,7 @@ public class MesosNimbus implements INimbus {
   }
 
   @SuppressWarnings("unchecked")
-  void initializeMesosStormConf(Map conf, String localDir) {
+  public void initializeMesosStormConf(Map conf, String localDir) {
     mesosStormConf = new HashMap();
     mesosStormConf.putAll(conf);
 
@@ -685,7 +685,7 @@ public class MesosNimbus implements INimbus {
   }
 
 
-  private Map<String, List<TaskInfo>> getTasksToLaunch(Topologies topologies,
+  protected Map<String, List<TaskInfo>> getTasksToLaunch(Topologies topologies,
                                                       Map<String, Collection<WorkerSlot>> slots,
                                                       Map<String, AggregatedOffers> aggregatedOffersPerNode) {
     Map<String, List<TaskInfo>> tasksToLaunchPerNode = new HashMap<>();

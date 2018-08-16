@@ -49,13 +49,13 @@ public class MesosCommon {
   public static final String WORKER_NAME_PREFIX_DELIMITER = "topology.mesos.worker.prefix.delimiter";
   public static final String MESOS_COMPONENT_NAME_DELIMITER = "topology.mesos.component.name.delimiter";
 
-  private static final double MESOS_MIN_CPU = 0.01;
-  private static final double MESOS_MIN_MEM_MB = 32;
-  private static final double DEFAULT_WORKER_CPU = 1;
-  private static final double DEFAULT_WORKER_MEM_MB = 1000;
-  private static final double DEFAULT_EXECUTOR_CPU = 0.1;
-  private static final double DEFAULT_EXECUTOR_MEM_MB = 500;
-  private static final int DEFAULT_SUICIDE_TIMEOUT_SECS = 120;
+  protected static final double MESOS_MIN_CPU = 0.01;
+  protected static final double MESOS_MIN_MEM_MB = 32;
+  public static final double DEFAULT_WORKER_CPU = 1;
+  public static final double DEFAULT_WORKER_MEM_MB = 1000;
+  public static final double DEFAULT_EXECUTOR_CPU = 0.1;
+  public static final double DEFAULT_EXECUTOR_MEM_MB = 500;
+  protected static final int DEFAULT_SUICIDE_TIMEOUT_SECS = 120;
   public static final String DEFAULT_SUPERVISOR_STORM_LOCAL_DIR = "storm-local";
 
   public static final String SUPERVISOR_ID = "supervisorid";
