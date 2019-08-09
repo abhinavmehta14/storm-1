@@ -15,7 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package storm.mesos;
+package storm.mesos.util;
 
 import org.apache.storm.Config;
 import org.apache.storm.generated.StormTopology;
@@ -23,10 +23,11 @@ import org.apache.storm.scheduler.TopologyDetails;
 import org.apache.mesos.Protos;
 import org.junit.Before;
 import org.junit.Test;
+import storm.mesos.MesosNimbus;
+import storm.mesos.TestUtils;
 import storm.mesos.resources.AggregatedOffers;
 import storm.mesos.resources.ReservationType;
 import storm.mesos.resources.ResourceType;
-import storm.mesos.util.MesosCommon;
 
 import java.util.Arrays;
 import java.util.ArrayList;

@@ -17,7 +17,6 @@
  */
 package storm.mesos;
 
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.storm.Config;
 import org.apache.storm.scheduler.INimbus;
 import org.apache.storm.scheduler.IScheduler;
@@ -90,6 +89,7 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 
+import static java.lang.String.format;
 import static storm.mesos.util.PrettyProtobuf.offerIDListToString;
 import static storm.mesos.util.PrettyProtobuf.offerToString;
 import static storm.mesos.util.PrettyProtobuf.offerMapToString;
@@ -97,49 +97,47 @@ import static storm.mesos.util.PrettyProtobuf.taskInfoListToString;
 import static storm.mesos.util.PrettyProtobuf.taskStatusListToTaskIDsString;
 
 public class MesosNimbus implements INimbus {
-  public static final String CONF_EXECUTOR_URI = "mesos.executor.uri";
-  public static final String CONF_MASTER_URL = "mesos.master.url";
-  public static final String CONF_MASTER_FAILOVER_TIMEOUT_SECS = "mesos.master.failover.timeout.secs";
-  public static final String CONF_MESOS_ALLOWED_HOSTS = "mesos.allowed.hosts";
-  public static final String CONF_MESOS_DISALLOWED_HOSTS = "mesos.disallowed.hosts";
-  public static final String CONF_MESOS_ROLE = "mesos.framework.role";
-  public static final String CONF_MESOS_PRINCIPAL = "mesos.framework.principal";
-  public static final String CONF_MESOS_SECRET_FILE = "mesos.framework.secret.file";
+  protected static final String CONF_EXECUTOR_URI = "mesos.executor.uri";
+  private static final String CONF_MASTER_URL = "mesos.master.url";
+  private static final String CONF_MASTER_FAILOVER_TIMEOUT_SECS = "mesos.master.failover.timeout.secs";
+  private static final String CONF_MESOS_ALLOWED_HOSTS = "mesos.allowed.hosts";
+  private static final String CONF_MESOS_DISALLOWED_HOSTS = "mesos.disallowed.hosts";
+  private static final String CONF_MESOS_ROLE = "mesos.framework.role";
+  private static final String CONF_MESOS_PRINCIPAL = "mesos.framework.principal";
+  private static final String CONF_MESOS_SECRET_FILE = "mesos.framework.secret.file";
 
-  public static final String CONF_MESOS_CHECKPOINT = "mesos.framework.checkpoint";
-  public static final String CONF_MESOS_LOCAL_FILE_SERVER_PORT = "mesos.local.file.server.port";
+  private static final String CONF_MESOS_CHECKPOINT = "mesos.framework.checkpoint";
+  private static final String CONF_MESOS_LOCAL_FILE_SERVER_PORT = "mesos.local.file.server.port";
   public static final String CONF_MESOS_FRAMEWORK_NAME = "mesos.framework.name";
-  public static final String CONF_MESOS_FRAMEWORK_USER = "mesos.framework.user";
-  public static final String CONF_MESOS_PREFER_RESERVED_RESOURCES = "mesos.prefer.reserved.resources";
-  public static final String CONF_MESOS_CONTAINER_DOCKER_IMAGE = "mesos.container.docker.image";
-  public static final String CONF_MESOS_SUPERVISOR_STORM_LOCAL_DIR = "mesos.supervisor.storm.local.dir";
-  public static final String FRAMEWORK_ID = "FRAMEWORK_ID";
+  private static final String CONF_MESOS_FRAMEWORK_USER = "mesos.framework.user";
+  private static final String CONF_MESOS_CONTAINER_DOCKER_IMAGE = "mesos.container.docker.image";
+  private static final String CONF_MESOS_SUPERVISOR_STORM_LOCAL_DIR = "mesos.supervisor.storm.local.dir";
+  private static final String FRAMEWORK_ID = "FRAMEWORK_ID";
 
-  public static final int TASK_RECONCILIATION_INTERVAL = 300000; // 5 minutes
+  private static final int TASK_RECONCILIATION_INTERVAL = 300000; // 5 minutes
 
   private static final Logger LOG = LoggerFactory.getLogger(MesosNimbus.class);
-  private final Object _offersLock = new Object();
-  protected java.net.URI _configUrl;
-  private LocalStateShim _state;
-  private NimbusMesosScheduler _mesosScheduler;
-  protected volatile SchedulerDriver _driver;
-  private volatile boolean _registeredAndInitialized = false;
-  private ZKClient _zkClient;
-  private String _logviewerZkDir;
-  private Timer _timer = new Timer();
+  private final Object offersLock = new Object();
+  private java.net.URI configUrl;
+  private LocalStateShim state;
+  private NimbusMesosScheduler mesosScheduler;
+  protected volatile SchedulerDriver driver;
+  private volatile boolean registeredAndInitialized = false;
+  private ZKClient zkClient;
+  private String logviewerZkDir;
+  private Timer timer = new Timer();
   private Map mesosStormConf;
-  private Set<String> _allowedHosts;
-  private Set<String> _disallowedHosts;
-  private Optional<Integer> _localFileServerPort;
-  private Map<OfferID, Offer> _offers;
-  private LocalFileServer _httpServer;
-  private IMesosStormScheduler _stormScheduler = null;
+  private Set<String> allowedHosts;
+  private Set<String> disallowedHosts;
+  private Optional<Integer> localFileServerPort;
+  private Map<OfferID, Offer> offers;
+  private LocalFileServer httpServer;
+  private IMesosStormScheduler stormScheduler = null;
   private String frameworkName;
 
-  private boolean _preferReservedResources = true;
-  private boolean _enabledLogviewerSidecar = true;
-  private Optional<String> _container = Optional.absent();
-  private Path _generatedConfPath;
+  private boolean enabledLogviewerSidecar = true;
+  private Optional<String> container = Optional.absent();
+  private Path generatedConfPath;
 
   private static Set listIntoSet(List l) {
     if (l == null) {
@@ -168,12 +166,12 @@ public class MesosNimbus implements INimbus {
 
   @Override
   public IScheduler getForcedScheduler() {
-    if (!_registeredAndInitialized) {
+    if (!registeredAndInitialized) {
       // Since this scheduler hasn't been initialized, we will return null
       return null;
     }
     // TODO: Make it configurable. We should be able to specify the scheduler to use in the storm.yaml
-    return (IScheduler) _stormScheduler;
+    return (IScheduler) stormScheduler;
   }
 
   @Override
@@ -187,17 +185,17 @@ public class MesosNimbus implements INimbus {
       initializeMesosStormConf(conf, localDir);
       startLocalHttpServer();
 
-      MesosSchedulerDriver driver = createMesosDriver();
+      driver = createMesosDriver();
 
       driver.start();
 
       LOG.info("Waiting for scheduler driver to register MesosNimbus with mesos-master and complete initialization...");
 
-      _mesosScheduler.waitUntilRegistered();
+      mesosScheduler.waitUntilRegistered();
 
       LOG.info("Scheduler registration and initialization complete...");
 
-      _registeredAndInitialized = true;
+      registeredAndInitialized = true;
 
     } catch (Exception e) {
       LOG.error("Failed to prepare scheduler ", e);
@@ -206,62 +204,57 @@ public class MesosNimbus implements INimbus {
   }
 
   @SuppressWarnings("unchecked")
-  void initializeMesosStormConf(Map conf, String localDir) {
+  public void initializeMesosStormConf(Map conf, String localDir) {
     mesosStormConf = new HashMap();
     mesosStormConf.putAll(conf);
 
     frameworkName = MesosCommon.getMesosFrameworkName(conf);
 
     try {
-      _state = new LocalStateShim(localDir);
+      state = new LocalStateShim(localDir);
     } catch (IOException exp) {
-      throw new RuntimeException(String.format("Encountered IOException while setting up LocalState at %s : %s", localDir, exp));
+      throw new RuntimeException(format("Encountered IOException while setting up LocalState at %s : %s", localDir, exp));
     }
 
-    _allowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_ALLOWED_HOSTS));
-    _disallowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_DISALLOWED_HOSTS));
-    _enabledLogviewerSidecar = MesosCommon.enabledLogviewerSidecar(conf);
+    allowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_ALLOWED_HOSTS));
+    disallowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_DISALLOWED_HOSTS));
+    enabledLogviewerSidecar = MesosCommon.enabledLogviewerSidecar(conf);
 
-    if (_enabledLogviewerSidecar) {
+    if (enabledLogviewerSidecar) {
       Set<String> zkServerSet = listIntoSet((List<String>) conf.get(Config.STORM_ZOOKEEPER_SERVERS));
       String zkPort = String.valueOf(conf.get(Config.STORM_ZOOKEEPER_PORT));
-      _logviewerZkDir = Optional.fromNullable((String) conf.get(Config.STORM_ZOOKEEPER_ROOT)).or("") + "/storm-mesos/logviewers";
-      LOG.info("Logviewer information will be stored under {}", _logviewerZkDir);
+      logviewerZkDir = Optional.fromNullable((String) conf.get(Config.STORM_ZOOKEEPER_ROOT)).or("") + "/storm-mesos/logviewers";
+      LOG.info("Logviewer information will be stored under {}", logviewerZkDir);
 
       if (zkPort == null || zkServerSet == null) {
         throw new RuntimeException("ZooKeeper configs are not found in storm.yaml: " + Config.STORM_ZOOKEEPER_SERVERS + ", " + Config.STORM_ZOOKEEPER_PORT);
       } else {
         List<String> zkConnectionList = new ArrayList<>();
         for (String server : zkServerSet) {
-          zkConnectionList.add(String.format("%s:%s", server, zkPort));
+          zkConnectionList.add(format("%s:%s", server, zkPort));
         }
-        _zkClient = new ZKClient(StringUtils.join(zkConnectionList, ','));
+        zkClient = new ZKClient(StringUtils.join(zkConnectionList, ','));
       }
     }
 
-    Boolean preferReservedResources = (Boolean) conf.get(CONF_MESOS_PREFER_RESERVED_RESOURCES);
-    if (preferReservedResources != null) {
-      _preferReservedResources = preferReservedResources;
-    }
-
-    _container = Optional.fromNullable((String) conf.get(CONF_MESOS_CONTAINER_DOCKER_IMAGE));
-    _mesosScheduler = new NimbusMesosScheduler(this, _zkClient, _logviewerZkDir);
+    container = Optional.fromNullable((String) conf.get(CONF_MESOS_CONTAINER_DOCKER_IMAGE));
+    mesosScheduler = new NimbusMesosScheduler(this, zkClient, logviewerZkDir);
 
     // Generate YAML to be served up to clients
-    _generatedConfPath = Paths.get(
+    generatedConfPath = Paths.get(
         Optional.fromNullable((String) conf.get(Config.STORM_LOCAL_DIR)).or("./"),
         "generated-conf");
-    if (!_generatedConfPath.toFile().exists() && !_generatedConfPath.toFile().mkdirs()) {
-      throw new RuntimeException("Couldn't create generated-conf dir, _generatedConfPath=" + _generatedConfPath.toString());
+    if (!generatedConfPath.toFile().exists() && !generatedConfPath.toFile().mkdirs()) {
+      throw new RuntimeException("Couldn't create generated-conf dir, generatedConfPath=" + generatedConfPath.toString());
     }
 
     try {
       mesosStormConf.put(Config.NIMBUS_HOST, MesosCommon.getNimbusHost(mesosStormConf));
     } catch (UnknownHostException exp) {
-      throw new RuntimeException(String.format("Exception while configuring nimbus host: %s", exp));
+      throw new RuntimeException(format("Exception while configuring nimbus host: %s", exp));
     }
 
-    Path pathToDumpConfig = Paths.get(_generatedConfPath.toString(), "storm.yaml");
+    Path pathToDumpConfig = Paths.get(generatedConfPath.toString(), "storm.yaml");
     try {
       File generatedConf = pathToDumpConfig.toFile();
       Yaml yaml = new Yaml();
@@ -273,35 +266,35 @@ public class MesosNimbus implements INimbus {
   }
 
   @SuppressWarnings("unchecked")
-  protected void startLocalHttpServer() throws Exception {
+  private void startLocalHttpServer() throws Exception {
     createLocalServerPort();
     setupHttpServer();
   }
 
   public void doRegistration(final SchedulerDriver driver, Protos.FrameworkID id) {
-    _driver = driver;
+    this.driver = driver;
     // Now that we've set the driver, we can create our scheduler
-    _stormScheduler = new StormSchedulerImpl(_driver);
+    stormScheduler = new StormSchedulerImpl(driver);
 
-    _state.put(FRAMEWORK_ID, id.getValue());
-    _offers = new HashMap<Protos.OfferID, Protos.Offer>();
+    state.put(FRAMEWORK_ID, id.getValue());
+    offers = new HashMap<OfferID, Offer>();
 
-    if (_enabledLogviewerSidecar) {
+    if (enabledLogviewerSidecar) {
 
-      _timer.scheduleAtFixedRate(new TimerTask() {
+      timer.scheduleAtFixedRate(new TimerTask() {
         @Override
         public void run() {
           // performing "explicit" reconciliation; master will respond with the latest state for all logviewer tasks
           // in the framework scheduler's statusUpdate() method
-          List<TaskStatus> taskStatuses = new ArrayList<TaskStatus>();
-          List<String> logviewerPaths = _zkClient.getChildren(_logviewerZkDir);
+          List<TaskStatus> taskStatuses = new ArrayList<>();
+          List<String> logviewerPaths = zkClient.getChildren(logviewerZkDir);
           if (logviewerPaths == null) {
-            _driver.reconcileTasks(taskStatuses);
+            driver.reconcileTasks(taskStatuses);
             return;
           }
           for (String path : logviewerPaths) {
             TaskID logviewerTaskId = TaskID.newBuilder()
-                                           .setValue(new String(_zkClient.getNodeData(String.format("%s/%s", _logviewerZkDir, path))))
+                                           .setValue(new String(zkClient.getNodeData(String.format("%s/%s", logviewerZkDir, path))))
                                            .build();
             TaskStatus logviewerTaskStatus = TaskStatus.newBuilder()
                                                        .setTaskId(logviewerTaskId)
@@ -309,7 +302,7 @@ public class MesosNimbus implements INimbus {
                                                        .build();
             taskStatuses.add(logviewerTaskStatus);
           }
-          _driver.reconcileTasks(taskStatuses);
+          driver.reconcileTasks(taskStatuses);
           LOG.info("Performing task reconciliation between scheduler and master on following tasks: {}", taskStatusListToTaskIDsString(taskStatuses));
         }
       }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
@@ -317,61 +310,61 @@ public class MesosNimbus implements INimbus {
   }
 
   public void shutdown() throws Exception {
-    _httpServer.shutdown();
+    httpServer.shutdown();
   }
 
   public void resourceOffers(SchedulerDriver driver, List<Protos.Offer> offers) {
-    synchronized (_offersLock) {
-      if (_offers == null) {
+    synchronized (offersLock) {
+      if (offers == null) {
         return;
       }
       LOG.debug("resourceOffers: Currently have {} offers buffered {}",
-                _offers.size(), (_offers.size() > 0 ? (":" + offerMapToString(_offers)) : ""));
+                offers.size(), (offers.size() > 0 ? (":" + offerMapToString(this.offers)) : ""));
 
       for (Protos.Offer offer : offers) {
         if (isHostAccepted(offer.getHostname())) {
           // TODO(ksoundararaj): Should we record the following as info instead of debug
           LOG.info("resourceOffers: Recording offer: {}", offerToString(offer));
-          _offers.put(offer.getId(), offer);
+          this.offers.put(offer.getId(), offer);
         } else {
           LOG.info("resourceOffers: Declining offer: {}", offerToString(offer));
           driver.declineOffer(offer.getId());
         }
       }
       LOG.info("resourceOffers: After processing offers, now have {} offers buffered: {}",
-                _offers.size(), offerMapToString(_offers));
+                offers.size(), offerMapToString(this.offers));
     }
   }
 
   public void offerRescinded(OfferID id) {
-    synchronized (_offersLock) {
-      _offers.remove(id);
+    synchronized (offersLock) {
+      offers.remove(id);
     }
   }
 
   private void createLocalServerPort() {
     Integer port = (Integer) mesosStormConf.get(CONF_MESOS_LOCAL_FILE_SERVER_PORT);
     LOG.debug("LocalFileServer configured to listen on port: {}", port);
-    _localFileServerPort = Optional.fromNullable(port);
+    localFileServerPort = Optional.fromNullable(port);
   }
 
   private void setupHttpServer() throws Exception {
-    _httpServer = new LocalFileServer();
-    _configUrl = _httpServer.serveDir("/generated-conf", _generatedConfPath.toString(), MesosCommon.getNimbusHost(mesosStormConf), _localFileServerPort);
+    httpServer = new LocalFileServer();
+    configUrl = httpServer.serveDir("/generated-conf", generatedConfPath.toString(), MesosCommon.getNimbusHost(mesosStormConf), localFileServerPort);
 
-    LOG.info("Started HTTP server from which config for the MesosSupervisor's may be fetched. URL: {}", _configUrl);
+    LOG.info("Started HTTP server from which config for the MesosSupervisor's may be fetched. URL: {}", configUrl);
   }
 
-  private MesosSchedulerDriver createMesosDriver() throws IOException {
+  private MesosSchedulerDriver createMesosDriver() {
     MesosSchedulerDriver driver;
     Credential credential;
     FrameworkInfo.Builder finfo = createFrameworkBuilder();
-    LOG.info(String.format("Registering framework with role '%s'", finfo.getRole()));
+    LOG.info(format("Registering framework with role '%s'", finfo.getRole()));
 
     if ((credential = getCredential(finfo)) != null) {
-      driver = new MesosSchedulerDriver(_mesosScheduler, finfo.build(), (String) mesosStormConf.get(CONF_MASTER_URL), credential);
+      driver = new MesosSchedulerDriver(mesosScheduler, finfo.build(), (String) mesosStormConf.get(CONF_MASTER_URL), credential);
     } else {
-      driver = new MesosSchedulerDriver(_mesosScheduler, finfo.build(), (String) mesosStormConf.get(CONF_MASTER_URL));
+      driver = new MesosSchedulerDriver(mesosScheduler, finfo.build(), (String) mesosStormConf.get(CONF_MASTER_URL));
     }
 
     return driver;
@@ -379,28 +372,28 @@ public class MesosNimbus implements INimbus {
 
   public boolean isHostAccepted(String hostname) {
     return
-        (_allowedHosts == null && _disallowedHosts == null) ||
-            (_allowedHosts != null && _allowedHosts.contains(hostname)) ||
-            (_disallowedHosts != null && !_disallowedHosts.contains(hostname));
+        (allowedHosts == null && disallowedHosts == null) ||
+            (allowedHosts != null && allowedHosts.contains(hostname)) ||
+            (disallowedHosts != null && !disallowedHosts.contains(hostname));
   }
 
 
   @Override
   public Collection<WorkerSlot> allSlotsAvailableForScheduling(
           Collection<SupervisorDetails> existingSupervisors, Topologies topologies, Set<String> topologiesMissingAssignments) {
-    if (!_registeredAndInitialized) {
-      return new ArrayList<WorkerSlot>();
+    if (!registeredAndInitialized) {
+      return new ArrayList<>();
     }
-    synchronized (_offersLock) {
-      /**
+    synchronized (offersLock) {
+      /*
        *  Not currently supporting automated logviewer launch for Docker containers
        *  ISSUE #215: https://github.com/mesos/storm/issues/215
        */
-      if (_enabledLogviewerSidecar && !_container.isPresent()) {
+      if (enabledLogviewerSidecar && !container.isPresent()) {
         launchLogviewer(existingSupervisors);
       }
-      return _stormScheduler.allSlotsAvailableForScheduling(
-              _offers,
+      return stormScheduler.allSlotsAvailableForScheduling(
+              offers,
               existingSupervisors,
               topologies,
               topologiesMissingAssignments);
@@ -411,18 +404,18 @@ public class MesosNimbus implements INimbus {
     final double logviewerCpu = 0.5;
     final double logviewerMemMb = 400.0;
 
-    Map<String, AggregatedOffers> aggregatedOffersPerNode = MesosCommon.getAggregatedOffersPerNode(_offers);
+    Map<String, AggregatedOffers> aggregatedOffersPerNode = MesosCommon.getAggregatedOffersPerNode(offers);
     StormSchedulerImpl stormScheduler = (StormSchedulerImpl) getForcedScheduler();
     boolean needLogviewer = false;
 
     String supervisorStormLocalDir = getStormLocalDirForWorkers();
     String configUri = getFullConfigUri();
-    String logviewerCommand = String.format("cp storm.yaml storm-mesos*/conf" +
+    String logviewerCommand = format("cp storm.yaml storm-mesos*/conf" +
                                             " && cd storm-mesos*" +
                                             " && bin/storm logviewer" +
                                             " -c storm.local.dir=%s", supervisorStormLocalDir);
 
-    /**
+    /*
      *  Go through each existing supervisor and:
      *    1. Check ZK if logviewer already exists on worker host, if not then proceed
      *    2. Look in the aggregratedOffersPerNode and check the node for offers, if there are offers then proceed
@@ -431,7 +424,7 @@ public class MesosNimbus implements INimbus {
      */
 
     for (SupervisorDetails supervisor : existingSupervisors) {
-      List<TaskInfo> logviewerTask = new ArrayList<TaskInfo>();
+      List<TaskInfo> logviewerTask = new ArrayList<>();
 
       if (!supervisor.getId().contains(MesosCommon.MESOS_COMPONENT_ID_DELIMITER)) {
         LOG.error("launchLogviewer: Supervisor ID, {}, formatting invalid, please re-launch all supervisors", supervisor.getId());
@@ -442,7 +435,7 @@ public class MesosNimbus implements INimbus {
       // supervisor ID
       String nodeId = supervisor.getId().split("\\" + MesosCommon.MESOS_COMPONENT_ID_DELIMITER)[1];
 
-      if (_zkClient.nodeExists(String.format("%s/%s", _logviewerZkDir, nodeId))) {
+      if (zkClient.nodeExists(format("%s/%s", logviewerZkDir, nodeId))) {
         continue;
       }
 
@@ -455,12 +448,12 @@ public class MesosNimbus implements INimbus {
 
       List<OfferID> offerIDList = aggregatedOffers.getOfferIDList();
 
-      List<Resource> resources = new ArrayList<Resource>();
-      List<ResourceEntry> resourceEntryList = null;
+      List<Resource> resources;
+      List<ResourceEntry> resourceEntryList;
 
       try {
         resourceEntryList = aggregatedOffers.reserveAndGet(ResourceType.CPU, new ScalarResourceEntry(logviewerCpu));
-        resources.addAll(createMesosScalarResourceList(ResourceType.CPU, resourceEntryList));
+        resources = new ArrayList<>(createMesosScalarResourceList(ResourceType.CPU, resourceEntryList));
         resourceEntryList = aggregatedOffers.reserveAndGet(ResourceType.MEM, new ScalarResourceEntry(logviewerMemMb));
         resources.addAll(createMesosScalarResourceList(ResourceType.MEM, resourceEntryList));
       } catch (ResourceNotAvailableException e) {
@@ -474,7 +467,7 @@ public class MesosNimbus implements INimbus {
                                                           .setValue(logviewerCommand);
 
       // i.e. "Storm!!!|worker-host4.dev|logviewer-1504045609.983"
-      String id = String.format("%s%s%s%slogviewer-%s",
+      String id = format("%s%s%s%slogviewer-%s",
                                 frameworkName,
                                 MesosCommon.MESOS_COMPONENT_ID_DELIMITER,
                                 nodeId,
@@ -485,7 +478,7 @@ public class MesosNimbus implements INimbus {
                             .build();
 
       // i.e. "Storm!!! | logviewer | 8888"
-      String name = String.format("%s%slogviewer%s%s",
+      String name = format("%s%slogviewer%s%s",
                                   frameworkName,
                                   MesosCommon.DEFAULT_MESOS_COMPONENT_NAME_DELIMITER,
                                   MesosCommon.DEFAULT_MESOS_COMPONENT_NAME_DELIMITER,
@@ -502,14 +495,14 @@ public class MesosNimbus implements INimbus {
 
       LOG.info("launchLogviewer: Using offerIDs: {} on host: {} to launch logviewer task: {}", offerIDListToString(offerIDList), nodeId, task.getTaskId().getValue());
 
-      _driver.launchTasks(offerIDList, logviewerTask);
+      driver.launchTasks(offerIDList, logviewerTask);
       for (OfferID offerID : offerIDList) {
-        _offers.remove(offerID);
+        offers.remove(offerID);
       }
 
-      String logviewerZKPath = String.format("%s/%s", _logviewerZkDir, nodeId);
-      _zkClient.createNode(logviewerZKPath);
-      _zkClient.updateNodeData(logviewerZKPath, taskId.getValue());
+      String logviewerZKPath = format("%s/%s", logviewerZkDir, nodeId);
+      zkClient.createNode(logviewerZKPath);
+      zkClient.updateNodeData(logviewerZKPath, taskId.getValue());
       LOG.info("launchLogviewer: Create logviewer state in zk: {}", logviewerZKPath);
     }
     if (needLogviewer) {
@@ -550,14 +543,14 @@ public class MesosNimbus implements INimbus {
       }
     }
 
-    synchronized (_offersLock) {
-      /**
+    synchronized (offersLock) {
+      /*
        * We need to call getAggregatedOffersPerNode again here for the following reasons
-       *   1. Because _offers could have changed between `allSlotsAvailableForScheduling()' and `assignSlots()'
+       *   1. Because offers could have changed between `allSlotsAvailableForScheduling()' and `assignSlots()'
        *   2. In `allSlotsAvailableForScheduling()', we change what is returned by `getAggregatedOffersPerNode'
        *      in order to calculate the number of slots available.
        */
-      Map<String, AggregatedOffers> aggregatedOffersPerNode = MesosCommon.getAggregatedOffersPerNode(_offers);
+      Map<String, AggregatedOffers> aggregatedOffersPerNode = MesosCommon.getAggregatedOffersPerNode(offers);
       Map<String, List<TaskInfo>> tasksToLaunchPerNode = getTasksToLaunch(topologies, slotsForTopologiesNeedingAssignments, aggregatedOffersPerNode);
 
       for (String node : tasksToLaunchPerNode.keySet()) {
@@ -566,9 +559,9 @@ public class MesosNimbus implements INimbus {
 
         LOG.info("Using offerIDs: {} on host: {} to launch tasks: {}", offerIDListToString(offerIDList), node, taskInfoListToString(taskInfoList));
 
-        _driver.launchTasks(offerIDList, taskInfoList);
+        driver.launchTasks(offerIDList, taskInfoList);
         for (OfferID offerID: offerIDList) {
-          _offers.remove(offerID);
+          offers.remove(offerID);
         }
       }
     }
@@ -588,7 +581,7 @@ public class MesosNimbus implements INimbus {
   // in the stored worker assignments).
   // Note that you *can* force the MesosSupervisor to use a specific directory by setting
   // the "mesos.supervisor.storm.local.dir" variable in the MesosNimbus's storm.yaml.
-  public String getStormLocalDirForWorkers() {
+  private String getStormLocalDirForWorkers() {
     String supervisorStormLocalDir = (String) mesosStormConf.get(CONF_MESOS_SUPERVISOR_STORM_LOCAL_DIR);
     if (supervisorStormLocalDir == null) {
       supervisorStormLocalDir = MesosCommon.DEFAULT_SUPERVISOR_STORM_LOCAL_DIR;
@@ -606,7 +599,7 @@ public class MesosNimbus implements INimbus {
 
   private List<Resource> createMesosScalarResourceList(ResourceType resourceType, List<ResourceEntry> scalarResourceEntryList) {
     List<Resource> retVal = new ArrayList<>();
-    ScalarResourceEntry scalarResourceEntry = null;
+    ScalarResourceEntry scalarResourceEntry;
 
     for (ResourceEntry resourceEntry : scalarResourceEntryList) {
       scalarResourceEntry = (ScalarResourceEntry) resourceEntry;
@@ -641,8 +634,8 @@ public class MesosNimbus implements INimbus {
 
   String getFullConfigUri() {
     try {
-      return new URL(_configUrl.toURL(),
-                 _configUrl.getPath() + "/storm.yaml").toString();
+      return new URL(configUrl.toURL(),
+                 configUrl.getPath() + "/storm.yaml").toString();
     } catch (MalformedURLException e) {
       throw new RuntimeException(e);
     }
@@ -664,19 +657,19 @@ public class MesosNimbus implements INimbus {
       .setData(ByteString.copyFromUtf8(executorDataStr))
       .addAllResources(executorResources);
 
-    ICommandLineShim commandLineShim = CommandLineShimFactory.makeCommandLineShim(_container.isPresent(), extraConfig);
-    /**
-     *  _container.isPresent() might be slightly misleading at first blush. It is only checking whether or not
+    ICommandLineShim commandLineShim = CommandLineShimFactory.makeCommandLineShim(container.isPresent(), extraConfig);
+    /*
+     *  container.isPresent() might be slightly misleading at first blush. It is only checking whether or not
      *  CONF_MESOS_CONTAINER_DOCKER_IMAGE is set to a value other than null.
      */
-    if (_container.isPresent()) {
+    if (container.isPresent()) {
       executorInfoBuilder.setCommand(CommandInfo.newBuilder()
                                                 .addUris(URI.newBuilder().setValue(configUri))
                                                 .setValue(commandLineShim.getCommandLine(details.getId())))
                          .setContainer(ContainerInfo.newBuilder()
                                                     .setType(ContainerInfo.Type.DOCKER)
                                                     .setDocker(ContainerInfo.DockerInfo.newBuilder()
-                                                                                       .setImage(_container.get())
+                                                                                       .setImage(container.get())
                                                                                        .setNetwork(ContainerInfo.DockerInfo.Network.HOST)
                                                                                        .setForcePullImage(true)
                                                                                        .build()
@@ -692,7 +685,7 @@ public class MesosNimbus implements INimbus {
   }
 
 
-  public Map<String, List<TaskInfo>> getTasksToLaunch(Topologies topologies,
+  protected Map<String, List<TaskInfo>> getTasksToLaunch(Topologies topologies,
                                                       Map<String, Collection<WorkerSlot>> slots,
                                                       Map<String, AggregatedOffers> aggregatedOffersPerNode) {
     Map<String, List<TaskInfo>> tasksToLaunchPerNode = new HashMap<>();
@@ -713,7 +706,7 @@ public class MesosNimbus implements INimbus {
         double requiredMem = workerMem;
 
         String workerHost = slot.getNodeId();
-        Long workerPort = Long.valueOf(slot.getPort());
+        Long workerPort = (long) slot.getPort();
 
         AggregatedOffers aggregatedOffers = aggregatedOffersPerNode.get(slot.getNodeId());
         String workerPrefix = "";
@@ -738,7 +731,7 @@ public class MesosNimbus implements INimbus {
         String extraConfig = "";
 
         if (!aggregatedOffers.isFit(mesosStormConf, topologyDetails, workerPort, hostsWithSupervisors.contains(workerHost))) {
-          LOG.error(String.format("Unable to launch worker %s for topology %s. Required cpu: %f, Required mem: %f, Required port: %d. Available aggregatedOffers : %s",
+          LOG.error(format("Unable to launch worker %s for topology %s. Required cpu: %f, Required mem: %f, Required port: %d. Available aggregatedOffers : %s",
                                   workerHost, topologyDetails.getId(), requiredCpu, requiredMem, workerPort, aggregatedOffers));
           continue;
         }
@@ -748,9 +741,9 @@ public class MesosNimbus implements INimbus {
 
         try {
           // This list will hold CPU and MEM resources
-          List<ResourceEntry> scalarResourceEntryList = null;
+          List<ResourceEntry> scalarResourceEntryList;
           // This list will hold PORTS resources
-          List<ResourceEntry> rangeResourceEntryList = null;
+          List<ResourceEntry> rangeResourceEntryList;
 
           if (hostsWithSupervisors.contains(workerHost)) {
             // Since we already have a supervisor on this host, we don't need to account for its resources by obtaining them from
@@ -767,7 +760,7 @@ public class MesosNimbus implements INimbus {
           }
 
           String supervisorStormLocalDir = getStormLocalDirForWorkers();
-          extraConfig += String.format(" -c storm.local.dir=%s", supervisorStormLocalDir);
+          extraConfig += format(" -c storm.local.dir=%s", supervisorStormLocalDir);
 
           // First add to the list of required worker resources the CPU resources we were able to secure
           scalarResourceEntryList = aggregatedOffers.reserveAndGet(ResourceType.CPU, new ScalarResourceEntry(workerCpu));
@@ -813,7 +806,7 @@ public class MesosNimbus implements INimbus {
     return tasksToLaunchPerNode;
   }
 
-  private FrameworkInfo.Builder createFrameworkBuilder() throws IOException {
+  private FrameworkInfo.Builder createFrameworkBuilder() {
     Number failoverTimeout = Optional.fromNullable((Number) mesosStormConf.get(CONF_MASTER_FAILOVER_TIMEOUT_SECS)).or(24 * 7 * 3600);
     String role = Optional.fromNullable((String) mesosStormConf.get(CONF_MESOS_ROLE)).or("*");
     Boolean checkpoint = Optional.fromNullable((Boolean) mesosStormConf.get(CONF_MESOS_CHECKPOINT)).or(false);
@@ -826,7 +819,7 @@ public class MesosNimbus implements INimbus {
                                                .setRole(role)
                                                .setCheckpoint(checkpoint);
 
-    String id = _state.get(FRAMEWORK_ID);
+    String id = state.get(FRAMEWORK_ID);
 
     if (id != null) {
       finfo.setId(FrameworkID.newBuilder().setValue(id).build());
@@ -873,10 +866,7 @@ public class MesosNimbus implements INimbus {
         } catch (IOException ex) {
           LOG.error("Error reading Mesos authentication secret file", ex);
           throw new RuntimeException(ex);
-        } catch (InvocationTargetException ex) {
-          LOG.error("Reflection Error", ex);
-          throw new RuntimeException(ex);
-        } catch (IllegalAccessException ex) {
+        } catch (IllegalAccessException | InvocationTargetException ex) {
           LOG.error("Reflection Error", ex);
           throw new RuntimeException(ex);
         }

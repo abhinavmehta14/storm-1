@@ -38,11 +38,13 @@ import java.util.concurrent.CountDownLatch;
 import static storm.mesos.util.PrettyProtobuf.taskStatusToString;
 
 public class NimbusMesosScheduler implements Scheduler {
-  private MesosNimbus mesosNimbus;
-  private ZKClient zkClient;
-  private String logviewerZkDir;
-  private CountDownLatch _registeredLatch = new CountDownLatch(1);
-  public static final Logger LOG = LoggerFactory.getLogger(MesosNimbus.class);
+
+  private static final Logger LOG = LoggerFactory.getLogger(MesosNimbus.class);
+
+  private final MesosNimbus mesosNimbus;
+  private final ZKClient zkClient;
+  private final String logviewerZkDir;
+  private final CountDownLatch registeredLatch = new CountDownLatch(1);
 
   public NimbusMesosScheduler(MesosNimbus mesosNimbus, ZKClient zkClient, String logviewerZkDir) {
     this.mesosNimbus = mesosNimbus;
@@ -51,7 +53,7 @@ public class NimbusMesosScheduler implements Scheduler {
   }
 
   public void waitUntilRegistered() throws InterruptedException {
-    _registeredLatch.await();
+    registeredLatch.await();
   }
 
   @Override
@@ -59,7 +61,7 @@ public class NimbusMesosScheduler implements Scheduler {
     mesosNimbus.doRegistration(driver, id);
 
     // Completed registration, let anything waiting for us to do so continue
-    _registeredLatch.countDown();
+    registeredLatch.countDown();
   }
 
   @Override
@@ -142,7 +144,7 @@ public class NimbusMesosScheduler implements Scheduler {
         break;
       default:
         // explicitly kill the logviewer task to ensure logviewer is terminated
-        mesosNimbus._driver.killTask(status.getTaskId());
+        mesosNimbus.driver.killTask(status.getTaskId());
     }
     // if it gets to this point it means logviewer terminated; update ZK with new logviewer state
     if (zkClient.nodeExists(logviewerZKPath)) {
